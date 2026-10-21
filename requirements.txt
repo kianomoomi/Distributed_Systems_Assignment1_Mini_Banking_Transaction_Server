@@ -1,0 +1,4 @@
+# No third-party Python packages required.
+# Environment used:
+# Python 3.12.3
+# SQLite 3.45.1, accessed through Python's built-in sqlite3 module.
