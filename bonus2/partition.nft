@@ -1,0 +1,23 @@
+# Apply on Server A only: 10.211.55.4
+# Blocks A-B communication and A-C etcd replication.
+# Client banking connections to A remain available.
+
+table inet bank_partition {
+    chain input {
+        type filter hook input priority -10; policy accept;
+
+        ip saddr 10.211.55.5 counter drop
+
+        ip saddr 10.211.55.3 tcp dport 2380 counter drop
+        ip saddr 10.211.55.3 tcp sport 2380 counter drop
+    }
+
+    chain output {
+        type filter hook output priority -10; policy accept;
+
+        ip daddr 10.211.55.5 counter drop
+
+        ip daddr 10.211.55.3 tcp dport 2380 counter drop
+        ip daddr 10.211.55.3 tcp sport 2380 counter drop
+    }
+}
