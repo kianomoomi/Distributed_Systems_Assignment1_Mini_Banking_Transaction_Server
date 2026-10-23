@@ -1,119 +1,162 @@
 # Mini Banking Transaction Server
 
-Mandatory implementation for Distributed Systems Assignment 1.
+Distributed Systems Assignment 1 — mandatory implementation and both bonuses.
+
+A simulated banking system supporting balance inquiries, deposits, and withdrawals. All accounts are fictional, and all amounts are **integer cents**.
+
+## Features
+
+| Part | Implementation |
+|---|---|
+| Mandatory | Concurrent TCP server, SQLite transactions, validation, logging, rollback, and crash durability |
+| Bonus 1 — Section 5 | Primary–backup failover, replicated etcd storage, automatic client retries, and request deduplication |
+| Bonus 2 — Section 6 | Real network-partition demonstration, split-brain prevention, and automatic recovery |
 
 ## Environment
 
-- Ubuntu 24.04 on two separate Parallels virtual machines
-- Python 3.12.3
-- SQLite 3.45.1
+- Ubuntu 24.04 ARM64 VMs in Parallels
+- Python **3.12.3**
+- SQLite **3.45.1**
+- etcd **3.4.30**
+- nftables for the partition demonstration
 - No third-party Python packages
 
-## Deployment
+| VM | IP | Role |
+|---|---|---|
+| Server A | `10.211.55.4` | Banking server A and etcd node-a |
+| Server B | `10.211.55.5` | Banking server B and etcd node-b |
+| Client | `10.211.55.3` | Banking clients and full etcd node-c |
 
-- Server VM: 10.37.129.4
-- Client VM: 10.37.129.3
-- TCP port: 5000
+Clients run on a separate VM and connect to actual server IPs.
 
-The client connects to the server VM's network IP, not localhost.
+## Repository Layout
 
-## Files
+- Root Python files: mandatory implementation.
+- [`bonus1/`](bonus1/): fault-tolerant banking implementation and tests.
+- [`bonus2/`](bonus2/): partition rules, recovery script, probe, and instructions.
+- Final report: architecture, correctness explanations, and validation results.
 
-- database.py: persistent accounts and transactional banking operations
-- server.py: concurrent TCP server, validation, client limit, and logging
-- client.py: command-line client
-- test_client.py: network error, rollback, and concurrency tests
+## Mandatory Implementation
 
-## Start the server
-
-On the server VM, from the project directory:
+On Server A:
 
 ```bash
 python3 server.py --max-clients 20 --demo-mode
 ```
 
-The database is initialized automatically. Existing balances are preserved.
-
-For ordinary operation without failure simulation:
+On the client:
 
 ```bash
-python3 server.py --max-clients 20
+python3 client.py balance A1001 --host 10.211.55.4
+python3 client.py deposit A1001 20000 --host 10.211.55.4
+python3 client.py withdraw A1001 5000 --host 10.211.55.4
+python3 test_client.py --host 10.211.55.4
 ```
 
-## Run the client
+The server listens on **port 5000**. Demo mode enables controlled failure injection; omit it for ordinary operation.
 
-On the client VM:
+Initial balances:
 
-```bash
-python3 client.py balance A1001 --host 10.37.129.4
-python3 client.py deposit A1001 20000 --host 10.37.129.4
-python3 client.py withdraw A1001 5000 --host 10.37.129.4
-```
+| Account | Cents |
+|---|---:|
+| A1001 | 100000 |
+| A1002 | 50000 |
+| A1003 | 200000 |
 
-Amounts and balances are integer cents: 100 means 1.00 currency unit.
+Each connection carries one newline-terminated JSON request and response:
 
-## Protocol
-
-Each TCP connection carries one UTF-8 JSON request ending in a newline.
-The server returns one JSON response ending in a newline and closes
-the connection. Requests must fit within 4096 bytes.
-
-Example request:
-
+```json
 {"action":"withdraw","account":"A1001","amount":200}
-
-Example success response:
-
-{"status":"success","account":"A1001","balance":99800,
-"unit":"cents","request_id":"generated-id"}
-
-Example error response:
-
-{"status":"error","message":"Insufficient funds",
-"request_id":"generated-id"}
-
-## Initial fictional accounts
-
-| Account | Balance in cents |
-|---------|------------------|
-| A1001   | 100000           |
-| A1002   | 50000            |
-| A1003   | 200000           |
-
-## Tests
-
-Start the server with --demo-mode and at least 10 client slots, then
-run on the client VM:
-
-```bash
-python3 test_client.py --host 10.37.129.4
 ```
 
-Tests change balances temporarily and assume no unrelated clients are
-modifying the tested accounts.
+Threads handle clients concurrently. A configurable semaphore limits active handlers. SQLite `BEGIN IMMEDIATE` protects balance changes, exceptions trigger rollback, and commits complete before success responses.
 
-To demonstrate rollback manually:
+Validation covers unknown accounts, insufficient funds, invalid amounts, unsupported actions, missing fields, and malformed requests. Structured logs are written to `bank.log`.
+
+## Bonus 1: Fault-Tolerant Cluster
+
+Start all three etcd members using their own persistent data directories. Check health:
 
 ```bash
-python3 client.py deposit A1001 12345 --fail-before-commit
+ETCDCTL_API=3 etcdctl \
+  --endpoints=http://10.211.55.4:2379,http://10.211.55.5:2379,http://10.211.55.3:2379 \
+  endpoint health
 ```
 
-The operation returns an error and leaves the balance unchanged.
+From the bonus source directory, start A first and wait for `primary_ready`, then start B:
 
-To demonstrate durability:
-1. Make a deposit and record the successful response balance.
-2. Find the server PID using: pgrep -af 'python3 server.py'
-3. Kill that PID using: kill -9 PID
-4. Restart the server without deleting database or journal files.
-5. Query the account and compare its balance with the recorded value.
+```bash
+# Server A
+python3 bonus_server.py --name A
 
-## Logging
+# Server B
+python3 bonus_server.py --name B
+```
 
-bank.log contains JSON request/response entries, including request ID,
-client IP, action, account, timestamp, result, latency, and delivery status.
+On the client:
 
-## Scope
+```bash
+python3 bonus_client.py balance A1001
+python3 bonus_workload.py
+```
 
-This version implements the mandatory single-server requirements.
-Automatic failover and network-partition handling are not implemented.
-The client does not automatically retry requests with uncertain outcomes.
+Bonus banking uses **port 5001**. etcd uses **2379** for its API and **2380** for replication.
+
+### Correctness
+
+- Three full etcd replicas require a majority of two to commit.
+- A ten-second lease identifies the banking primary.
+- Atomic ownership checks prevent stale-primary writes.
+- Balance updates and completed request records commit together.
+- Retries preserve the request ID and return saved results.
+- Reusing an ID for different operation details is rejected.
+
+The banking primary and etcd replication leader are separate roles.
+
+### Demonstrations
+
+1. Kill A’s banking process during the workload; B takes over automatically.
+2. Start A with `--reply-delay 20`, then kill it after a matching `reply_delayed` event. The client retries through B without applying the deposit twice.
+
+The workload performs 30 deposits of 100 cents and 30 withdrawals of 40 cents, checking an expected net increase of **1800 cents**.
+
+## Bonus 2: Network Partition
+
+While A is primary and the workload is active, apply on **Server A only**:
+
+```bash
+sudo nft -c -f partition.nft
+sudo nft -f partition.nft
+sudo nft list table inet bank_partition
+```
+
+The rules block A–B communication and A’s replication traffic with node-c. Client banking connections remain available.
+
+During the partition:
+
+- Both banking processes and all etcd processes remain running.
+- Isolated A cannot commit through a majority.
+- B and node-c retain a majority and continue service.
+- A refuses fresh banking operations.
+
+On the client:
+
+```bash
+python3 probe_isolated.py
+```
+
+Restore connectivity on A:
+
+```bash
+sudo nft delete table inet bank_partition
+```
+
+No service restart is required. Verify cluster health and the workload’s final balance after recovery.
+
+## Verified Results
+
+- Mandatory concurrency, overdraft prevention, rollback, client-limit, and restart checks passed.
+- The continuous workload completed after primary failure.
+- A committed 700-cent deposit with a lost reply was recovered through B; duplicate retries did not change the balance again.
+- During partition testing, A returned a retryable refusal while B served requests.
+- After reconnection, all three endpoints were healthy and consistent reads agreed with the expected final balance.
